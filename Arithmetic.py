@@ -9,18 +9,27 @@ import lark
 grammar = r"""
     start: sum
 
-    ?sum: product
-        | sum "+" product   -> add
-        | sum "-" product   -> sub
+    ?sum: sum "+" term   -> add
+        | sum "-" term   -> sub
+        | term
 
-    ?product: atom
-        | product "*" atom  -> mul
-        | product "/" atom  -> div
+    ?term: term "*" power   -> mul
+        | term "/" power    -> div
+        | term "%" power    -> mod
+        | term atom         -> imp_mul
+        | power
+
+    ?power: atom "**" factor -> exp
+        | factor
+
+    ?factor: "+" factor     -> pos
+        | "-" factor        -> neg
+        | atom
 
     ?atom: NUMBER           -> number
         | "(" sum ")"       -> paren
 
-    NUMBER: /-?[0-9]+/
+    NUMBER: /[0-9]+/
 
     %import common.WS_INLINE
     %ignore WS_INLINE
@@ -127,7 +136,57 @@ class Interpreter(lark.visitors.Interpreter):
     >>> interpreter.visit(parser.parse("(1+2)(3(4))"))
     36
     '''
+    def start(self, tree):
+        return self.visit(tree.children[0]) 
 
+    def number(self, tree):
+        return int(tree.children[0].value)
+
+    def add(self, tree):
+        left = self.visit(tree.children[0])
+        right = self.visit(tree.children[1])
+        return left + right
+
+    def sub(self,tree):
+        left = self.visit(tree.children[0])
+        right = self.visit(tree.children[1])
+        return left - right
+
+    def mul(self,tree):
+        left = self.visit(tree.children[0])
+        right = self.visit(tree.children[1])
+        return left * right
+
+    def div(self,tree):
+        left = self.visit(tree.children[0])
+        right = self.visit(tree.children[1])
+        return left // right
+
+    def mod(self,tree):
+        left = self.visit(tree.children[0])
+        right = self.visit(tree.children[1])
+        return left % right
+
+    def exp(self,tree):
+        left = self.visit(tree.children[0])
+        right = self.visit(tree.children[1])
+        return left ** right if right >=0 else 0
+
+    def neg(self, tree):
+        value = self.visit(tree.children[0])
+        return -value
+
+    def pos(self, tree):
+        return self.visit(tree.children[0])
+
+    def imp_mul(self, tree):
+        left = self.visit(tree.children[0])
+        right = self.visit(tree.children[1])
+        return left * right
+    
+    def paren(self, tree):
+        result = self.visit(tree.children[0])
+        return result
 
 class Simplifier(lark.Transformer):
     '''
@@ -226,12 +285,132 @@ class Simplifier(lark.Transformer):
     >>> simplifier.transform(parser.parse("(1+2)(3(4))"))
     36
     '''
+    def start(self, children):
+        return children[0]
+        
+    def NUMBER(self, token):
+        return int(token)
 
+    def number(self, children):
+        return children[0]
+
+    def add(self, children):
+        return children[0] + children[1]
+
+    def sub(self, children):
+        return children[0] - children[1]
+
+    def mul(self, children):
+        return children[0] * children[1]
+
+    def div(self, children):
+        return children[0] // children[1]
+
+    def mod(self, children):
+        return children[0] % children[1]
+
+    def pos(self, children):
+        return children[0]
+
+    def neg(self, children):
+        return -children[0]
+
+    def exp(self, children):
+        return children[0] ** children[1] if children[1] >= 0 else 0
+
+    def imp_mul(self, children):
+        return children[0] * children[1]
+
+    def paren(self, children):
+        return children[0]
 
 ########################################
 # other transformations
 ########################################
 
+class RemParentheses(lark.Transformer):
+    precedence = {
+        'add': 1,
+        'sub': 1,
+        'mul': 2,
+        'div': 2,
+    }
+
+    def paren(self, children):
+        child = children[0]
+        if isinstance(child, lark.Tree):
+            child_op = child.data
+            if self.precedence.get(child_op, 0) >= self.precedence['add']:
+                return child
+        return child if len(children) == 1 else lark.Tree('paren', children)
+
+    def start(self, children):
+        return children[0]
+
+    def add(self, children):
+        return self._wrap_in_tree('add', children)
+
+    def sub(self, children):
+        return self._wrap_in_tree('sub', children)
+
+    def mul(self, children):
+        return self._wrap_in_tree('mul', children)
+
+    def div(self, children):
+        return self._wrap_in_tree('div', children)
+
+    def number(self, children):
+        return children[0]
+
+    def _wrap_in_tree(self, op, children):
+        left, right = children
+        if isinstance(left, lark.Tree) and self.precedence.get(left.data, 0) < self.precedence[op]:
+            left = lark.Tree('paren', [left])
+        if isinstance(right, lark.Tree) and self.precedence.get(right.data, 0) < self.precedence[op]:
+            right = lark.Tree('paren', [right])
+        return lark.Tree(op, [left, right])
+
+class ASTToString(lark.Transformer):
+    def start(self, children):
+        return children[0]
+
+    def add(self, children):
+        left, right = children
+        return f"{left}+{right}"
+
+    def sub(self, children):
+        left, right = children
+        return f"{left}-{right}"
+
+    def mul(self, children):
+        left, right = children
+        return f"{left}*{right}"
+
+    def div(self, children):
+        left, right = children
+        return f"{left}/{right}"
+
+    def mod(self, children):
+        left, right = children
+        return f"{left}%{right}"
+
+    def exp(self, children):
+        left, right = children
+        return f"{left}**{right}"
+
+    def neg(self, children):
+        value = children[0]
+        return f"-{value}"
+
+    def pos(self, children):
+        value = children[0]
+        return f"+{value}"
+
+    def number(self, children):
+        return children[0].value
+
+    def paren(self, children):
+        return f"({children[0]})"
 
 def minify(expr):
     '''
@@ -246,7 +425,7 @@ def minify(expr):
     HINT:
     My solution uses two lark.Transformer classes.
     The first one takes an AST and removes any unneeded parentheses.
-    The second taks an AST and converts the AST into a string.
+    The second takes an AST and converts the AST into a string.
     You can solve this problem by calling parser.parse,
     and then applying the two transformers above to the resulting AST.
 
@@ -283,6 +462,35 @@ def minify(expr):
     '1+2*3+4*(5+6-7)'
     '''
 
+    tree = parser.parse(expr)
+
+    simplified_tree = RemParentheses().transform(tree)
+
+    minified_expr = ASTToString().transform(simplified_tree)
+
+    return minified_expr
+
+class InfixToRPN(lark.Transformer):
+    def start(self, children):
+        return children[0]
+
+    def add(self, children):
+        return f"{children[0]} {children[1]} +"
+
+    def sub(self, children):
+        return f"{children[0]} {children[1]} -"
+
+    def mul(self, children):
+        return f"{children[0]} {children[1]} *"
+
+    def div(self, children):
+        return f"{children[0]} {children[1]} /"
+
+    def number(self, children):
+        return children[0].value
+
+    def paren(self, children):
+        return children[0]
 
 def infix_to_rpn(expr):
     '''
@@ -311,6 +519,9 @@ def infix_to_rpn(expr):
     >>> infix_to_rpn('(1*2)+3+4*(5-6)')
     '1 2 * 3 + 4 5 6 - * +'
     '''
+    tree = parser.parse(expr)
+    rpn_expr = InfixToRPN().transform(tree)
+    return rpn_expr
 
 
 def eval_rpn(expr):
